@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+import re, argh, argparse, os, gzip, sqlite3 as sql
+
+def find(databases=None, *terms):
+    """Look up the given terms in any of the given databases, or ABOUT_PATH"""
+    databases = (databases or os.environ('ABOUT_PATH')).split(":")
+    results = []
+    for database in databases:
+        db = sql.connect(database)
+        for row in db.execute('select type, origin, name, summary from term_source inner join term_index on term_source.rowid = term_index.rowid where term_index.words match (?)', (" ".join(terms), )):
+            results.append(row)
+        db.close()
+    for i, result in enumerate(results[:1]):
+        print(i, result[0], result[2], result[3])
+
+def manpages_in(paths):
+    for path in filter(os.path.exists, paths):
+        for r, d, fs in os.walk(path):
+            for f in fs:
+                if f.endswith(".gz"):
+                    path = os.path.join(r, f)
+                    with gzip.open(path, 'rt', encoding='utf8') as fin:
+                        raw_text = fin.read()
+                    yield os.path.abspath(path), raw_text
+
+man_name_re = re.compile(r'^\.SH\s+"?NAME"?(.+)^\.SH', re.MULTILINE|re.DOTALL)
+
+def index_man(db, paths):
+    for page, data in manpages_in(paths):
+        parts = os.path.basename(page).split(".")
+        title = '%s(%s)' % ('.'.join(parts[:-2]), parts[-2])
+
+        try:
+            # this doesn't work, but it would be nice not to format the manpage each time either.
+            # presumably someone has done this before (e.g. the apropos command's tricks)
+            page_title = man_name_re.search(data).group(1)
+        except AttributeError:
+            page_title = ""
+
+        rowid = db.execute('INSERT INTO term_source (type, origin, name, summary) values ("man", ?, ?, ?)',
+                           (page, title, page_title)).lastrowid
+
+        db.execute('INSERT INTO term_index (docid, words) values (?, ?)', (rowid, data, ))
+        
+
+def index(database='about.db', kind="man", *paths):
+    """Generate an index of the help files on the given paths, into the given database. The database will be destroyed and recreated."""
+    if os.path.exists(database):
+        os.unlink(database)
+
+    db = sql.connect(database)
+    db.execute('CREATE VIRTUAL TABLE term_index USING fts4(tokenize=porter, content="", words text)')
+    db.execute('CREATE TABLE term_source (type, origin, name, summary)')
+    if kind == "man":
+        index_man(db, paths)
+
+    db.commit()
+    db.close()
+
+p = argparse.ArgumentParser()
+argh.add_commands(p, [find, index])
+
+if __name__ == '__main__':
+    argh.dispatch(p)
